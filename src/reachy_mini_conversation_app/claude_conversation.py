@@ -131,6 +131,60 @@ class ClaudeConversationHandler(AsyncStreamHandler):
             self.model,
         )
 
+    async def apply_personality(self, profile: str | None) -> str:
+        """Apply a new personality (profile) at runtime.
+
+        Updates the global config's selected profile for subsequent calls.
+        Reloads the system prompt for the next conversation turn.
+
+        Returns a short status message for UI feedback.
+        """
+        try:
+            from reachy_mini_conversation_app.config import config as _config
+            from reachy_mini_conversation_app.config import set_custom_profile
+            from reachy_mini_conversation_app.prompts import get_session_instructions
+
+            set_custom_profile(profile)
+            logger.info(
+                "Set custom profile to %r (config=%r)", profile, getattr(_config, "REACHY_MINI_CUSTOM_PROFILE", None)
+            )
+
+            # Reload the system prompt
+            try:
+                self.system_prompt = get_session_instructions()
+                # Clear conversation history to start fresh with new personality
+                self.messages = []
+                logger.info("Reloaded system prompt for profile %r", profile)
+            except Exception as e:
+                logger.error("Failed to reload system prompt: %s", e)
+                return f"Failed to apply personality: {e}"
+
+            display_name = profile or "(built-in default)"
+            return f"Applied personality: {display_name}"
+
+        except Exception as e:
+            logger.error("apply_personality failed: %s", e)
+            return f"Error: {e}"
+
+    async def get_available_voices(self) -> list[str]:
+        """Return available voices for Claude mode (Google TTS voices).
+
+        For now returns a simple list since we use Google TTS.
+        """
+        # Google TTS Standard voices that work well
+        return [
+            "en-US-Standard-F",
+            "en-US-Standard-A",
+            "en-US-Standard-B",
+            "en-US-Standard-C",
+            "en-US-Standard-D",
+            "en-US-Standard-E",
+            "en-US-Standard-G",
+            "en-US-Standard-H",
+            "en-US-Standard-I",
+            "en-US-Standard-J",
+        ]
+
     async def start_up(self) -> None:
         """Initialize the handler components."""
         logger.info("Starting Claude conversation handler...")
