@@ -33,7 +33,7 @@ dependencies = [
 
 [project.optional-dependencies]
 reachy_mini_wireless = [
-  "PyGObject>=3.42.2,<=3.46.0", 
+  "PyGObject>=3.42.2,<=3.46.0",
   "gst-signalling>=1.1.2",
 ]
 local_vision = ["torch", "transformers", "num2words"]
@@ -43,6 +43,11 @@ all_vision = [
   "torch", "transformers", "num2words",
   "ultralytics", "supervision",
   "mediapipe==0.10.14",
+]
+claude = [
+  "anthropic>=0.40.0",
+  "google-cloud-speech>=2.20.0",
+  "google-cloud-texttospeech>=2.14.0",
 ]
 
 [dependency-groups]

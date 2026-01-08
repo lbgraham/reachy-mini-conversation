@@ -49,7 +49,13 @@ def run(
     from reachy_mini_conversation_app.audio.head_wobbler import HeadWobbler
 
     logger = setup_logger(args.debug)
-    logger.info("Starting Reachy Mini Conversation App")
+
+    # Determine which backend to use
+    use_claude = getattr(args, 'claude', False)
+    if use_claude:
+        logger.info("Starting Reachy Mini Conversation App (Claude mode)")
+    else:
+        logger.info("Starting Reachy Mini Conversation App (OpenAI mode)")
 
     if args.no_camera and args.head_tracker is not None:
         logger.warning("Head tracking is not activated due to --no-camera.")
@@ -69,6 +75,9 @@ def run(
         elif args.wireless_version and args.on_device:
             logger.info("Using GStreamer backend for on-device wireless version")
             robot = ReachyMini(media_backend="gstreamer")
+        elif args.no_camera:
+            logger.info("Using no_media backend (--no-camera specified)")
+            robot = ReachyMini(media_backend="no_media")
         else:
             logger.info("Using default backend for lite version")
             robot = ReachyMini(media_backend="default")
@@ -109,16 +118,39 @@ def run(
     )
     logger.debug(f"Chatbot avatar images: {chatbot.avatar_images}")
 
-    handler = OpenaiRealtimeHandler(deps, gradio_mode=args.gradio, instance_path=instance_path)
+    # Create the appropriate handler based on --claude flag
+    if use_claude:
+        from reachy_mini_conversation_app.claude_conversation import ClaudeConversationHandler
+        from reachy_mini_conversation_app.config import config
+
+        claude_model = getattr(args, 'claude_model', None) or config.CLAUDE_MODEL
+        handler = ClaudeConversationHandler(
+            deps,
+            gradio_mode=args.gradio,
+            instance_path=instance_path,
+            model=claude_model,
+        )
+        logger.info(f"Using Claude handler with model: {claude_model}")
+    else:
+        handler = OpenaiRealtimeHandler(deps, gradio_mode=args.gradio, instance_path=instance_path)
+        logger.info("Using OpenAI Realtime handler")
 
     stream_manager: gr.Blocks | LocalStream | None = None
 
     if args.gradio:
-        api_key_textbox = gr.Textbox(
-            label="OPENAI API Key",
-            type="password",
-            value=os.getenv("OPENAI_API_KEY") if not get_space() else "",
-        )
+        # Different API key label based on backend
+        if use_claude:
+            api_key_textbox = gr.Textbox(
+                label="ANTHROPIC API Key",
+                type="password",
+                value=os.getenv("ANTHROPIC_API_KEY") if not get_space() else "",
+            )
+        else:
+            api_key_textbox = gr.Textbox(
+                label="OPENAI API Key",
+                type="password",
+                value=os.getenv("OPENAI_API_KEY") if not get_space() else "",
+            )
 
         from reachy_mini_conversation_app.gradio_personality import PersonalityUI
 
@@ -207,6 +239,13 @@ class ReachyMiniConversationApp(ReachyMiniApp):  # type: ignore[misc]
 
     custom_app_url = "http://0.0.0.0:7860/"
     dont_start_webserver = False
+
+    def __init__(self) -> None:
+        super().__init__()
+        # Parse args to check for --no-camera flag
+        args, _ = parse_args()
+        if args.no_camera:
+            self.media_backend = "no_media"
 
     def run(self, reachy_mini: ReachyMini, stop_event: threading.Event) -> None:
         """Run the Reachy Mini conversation app."""

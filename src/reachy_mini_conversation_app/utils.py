@@ -37,6 +37,17 @@ def parse_args() -> Tuple[argparse.Namespace, list]:  # type: ignore
         action="store_true",
         help="Use when conversation app is running on the same device as Reachy Mini daemon",
     )
+    parser.add_argument(
+        "--claude",
+        default=False,
+        action="store_true",
+        help="Use Claude API with Google Cloud STT/TTS instead of OpenAI Realtime",
+    )
+    parser.add_argument(
+        "--claude-model",
+        default=None,
+        help="Claude model to use (default: from CLAUDE_MODEL env or claude-sonnet-4-20250514)",
+    )
     return parser.parse_known_args()
 
 
