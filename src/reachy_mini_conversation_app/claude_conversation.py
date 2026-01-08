@@ -594,6 +594,16 @@ class ClaudeConversationHandler(AsyncStreamHandler):
         """Clean up resources."""
         self._shutdown_requested = True
 
+        # Wait for any ongoing processing (Claude API calls, TTS) to complete
+        if self.is_processing:
+            logger.debug("Waiting for processing to complete...")
+            for _ in range(100):  # Wait up to 10 seconds for processing
+                await asyncio.sleep(0.1)
+                if not self.is_processing:
+                    break
+            if self.is_processing:
+                logger.warning("Processing still ongoing after timeout")
+
         # Give STT a moment to finalize any pending transcript
         if self.stt and self.stt._is_streaming:
             logger.debug("Waiting for STT to finalize...")
