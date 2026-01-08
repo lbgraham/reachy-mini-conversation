@@ -160,6 +160,47 @@ class LocalStream:
         except Exception as e:
             logger.warning("Failed to persist OPENAI_API_KEY: %s", e)
 
+    def _persist_anthropic_key(self, key: str) -> None:
+        """Persist Anthropic API key to environment and instance ``.env``."""
+        k = (key or "").strip()
+        if not k:
+            return
+        # Update live process env and config
+        try:
+            os.environ["ANTHROPIC_API_KEY"] = k
+        except Exception:
+            pass
+        try:
+            config.ANTHROPIC_API_KEY = k
+        except Exception:
+            pass
+
+        if not self._instance_path:
+            return
+        try:
+            inst = Path(self._instance_path)
+            env_path = inst / ".env"
+            lines = self._read_env_lines(env_path)
+            replaced = False
+            for i, ln in enumerate(lines):
+                if ln.strip().startswith("ANTHROPIC_API_KEY="):
+                    lines[i] = f"ANTHROPIC_API_KEY={k}"
+                    replaced = True
+                    break
+            if not replaced:
+                lines.append(f"ANTHROPIC_API_KEY={k}")
+            final_text = "\n".join(lines) + "\n"
+            env_path.write_text(final_text, encoding="utf-8")
+            logger.info("Persisted ANTHROPIC_API_KEY to %s", env_path)
+
+            try:
+                from dotenv import load_dotenv
+                load_dotenv(dotenv_path=str(env_path), override=True)
+            except Exception:
+                pass
+        except Exception as e:
+            logger.warning("Failed to persist ANTHROPIC_API_KEY: %s", e)
+
     def _persist_personality(self, profile: Optional[str]) -> None:
         """Persist the startup personality to the instance .env and config."""
         selection = (profile or "").strip() or None
@@ -238,7 +279,8 @@ class LocalStream:
                 pass
 
         class ApiKeyPayload(BaseModel):
-            openai_api_key: str
+            openai_api_key: str = ""
+            anthropic_api_key: str = ""
 
         # GET / -> index.html
         @self._settings_app.get("/")
@@ -250,11 +292,14 @@ class LocalStream:
         def _favicon() -> Response:
             return Response(status_code=204)
 
-        # GET /status -> whether key is set
+        # GET /status -> whether key is set (OpenAI or Anthropic)
         @self._settings_app.get("/status")
         def _status() -> JSONResponse:
-            has_key = bool(config.OPENAI_API_KEY and str(config.OPENAI_API_KEY).strip())
-            return JSONResponse({"has_key": has_key})
+            has_openai = bool(config.OPENAI_API_KEY and str(config.OPENAI_API_KEY).strip())
+            has_anthropic = bool(config.ANTHROPIC_API_KEY and str(config.ANTHROPIC_API_KEY).strip())
+            # Claude mode if Anthropic key is set
+            mode = "claude" if has_anthropic else "openai"
+            return JSONResponse({"has_key": has_openai or has_anthropic, "mode": mode})
 
         # GET /ready -> whether backend finished loading tools
         @self._settings_app.get("/ready")
@@ -266,7 +311,7 @@ class LocalStream:
                 ready = False
             return JSONResponse({"ready": ready})
 
-        # POST /openai_api_key -> set/persist key
+        # POST /openai_api_key -> set/persist OpenAI key
         @self._settings_app.post("/openai_api_key")
         def _set_key(payload: ApiKeyPayload) -> JSONResponse:
             key = (payload.openai_api_key or "").strip()
@@ -275,31 +320,71 @@ class LocalStream:
             self._persist_api_key(key)
             return JSONResponse({"ok": True})
 
+        # POST /anthropic_api_key -> set/persist Anthropic key
+        @self._settings_app.post("/anthropic_api_key")
+        def _set_anthropic_key(payload: ApiKeyPayload) -> JSONResponse:
+            key = (payload.anthropic_api_key or "").strip()
+            if not key:
+                return JSONResponse({"ok": False, "error": "empty_key"}, status_code=400)
+            self._persist_anthropic_key(key)
+            return JSONResponse({"ok": True})
+
         # POST /validate_api_key -> validate key without persisting it
         @self._settings_app.post("/validate_api_key")
         async def _validate_key(payload: ApiKeyPayload) -> JSONResponse:
-            key = (payload.openai_api_key or "").strip()
-            if not key:
-                return JSONResponse({"valid": False, "error": "empty_key"}, status_code=400)
+            # Check if Anthropic key provided
+            anthropic_key = (payload.anthropic_api_key or "").strip()
+            openai_key = (payload.openai_api_key or "").strip()
 
-            # Try to validate by checking if we can fetch the models
-            try:
-                import httpx
+            if anthropic_key:
+                # Validate Anthropic key
+                try:
+                    import httpx
 
-                headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
-                async with httpx.AsyncClient(timeout=10.0) as client:
-                    response = await client.get("https://api.openai.com/v1/models", headers=headers)
-                    if response.status_code == 200:
-                        return JSONResponse({"valid": True})
-                    elif response.status_code == 401:
-                        return JSONResponse({"valid": False, "error": "invalid_api_key"}, status_code=401)
-                    else:
-                        return JSONResponse(
-                            {"valid": False, "error": "validation_failed"}, status_code=response.status_code
+                    headers = {
+                        "x-api-key": anthropic_key,
+                        "anthropic-version": "2023-06-01",
+                        "Content-Type": "application/json"
+                    }
+                    async with httpx.AsyncClient(timeout=10.0) as client:
+                        # Simple request to check auth - just hit models endpoint
+                        response = await client.get(
+                            "https://api.anthropic.com/v1/models",
+                            headers=headers
                         )
-            except Exception as e:
-                logger.warning(f"API key validation failed: {e}")
-                return JSONResponse({"valid": False, "error": "validation_error"}, status_code=500)
+                        if response.status_code == 200:
+                            return JSONResponse({"valid": True})
+                        elif response.status_code == 401:
+                            return JSONResponse({"valid": False, "error": "invalid_api_key"}, status_code=401)
+                        else:
+                            return JSONResponse(
+                                {"valid": False, "error": "validation_failed"}, status_code=response.status_code
+                            )
+                except Exception as e:
+                    logger.warning(f"Anthropic API key validation failed: {e}")
+                    return JSONResponse({"valid": False, "error": "validation_error"}, status_code=500)
+
+            elif openai_key:
+                # Validate OpenAI key
+                try:
+                    import httpx
+
+                    headers = {"Authorization": f"Bearer {openai_key}", "Content-Type": "application/json"}
+                    async with httpx.AsyncClient(timeout=10.0) as client:
+                        response = await client.get("https://api.openai.com/v1/models", headers=headers)
+                        if response.status_code == 200:
+                            return JSONResponse({"valid": True})
+                        elif response.status_code == 401:
+                            return JSONResponse({"valid": False, "error": "invalid_api_key"}, status_code=401)
+                        else:
+                            return JSONResponse(
+                                {"valid": False, "error": "validation_failed"}, status_code=response.status_code
+                            )
+                except Exception as e:
+                    logger.warning(f"OpenAI API key validation failed: {e}")
+                    return JSONResponse({"valid": False, "error": "validation_error"}, status_code=500)
+            else:
+                return JSONResponse({"valid": False, "error": "empty_key"}, status_code=400)
 
         self._settings_initialized = True
 

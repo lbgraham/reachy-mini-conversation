@@ -176,6 +176,16 @@ def run(
         else:
             app = settings_app
 
+        # Add status endpoint for settings page compatibility
+        from fastapi.responses import JSONResponse
+
+        @app.get("/status")
+        def _status() -> JSONResponse:
+            has_openai = bool(config.OPENAI_API_KEY and str(config.OPENAI_API_KEY).strip())
+            has_anthropic = bool(config.ANTHROPIC_API_KEY and str(config.ANTHROPIC_API_KEY).strip())
+            mode = "claude" if has_anthropic else "openai"
+            return JSONResponse({"has_key": has_openai or has_anthropic, "mode": mode})
+
         personality_ui.wire_events(handler, stream_manager)
 
         app = gr.mount_gradio_app(app, stream.ui, path="/")

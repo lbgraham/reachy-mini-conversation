@@ -1,10 +1,16 @@
+// Global mode (openai or claude)
+let currentMode = "openai";
+
 async function fetchStatus() {
   try {
     const url = new URL("/status", window.location.origin);
     url.searchParams.set("_", Date.now().toString());
     const resp = await fetchWithTimeout(url, {}, 2000);
     if (!resp.ok) throw new Error("status error");
-    return await resp.json();
+    const data = await resp.json();
+    // Update global mode
+    if (data.mode) currentMode = data.mode;
+    return data;
   } catch (e) {
     return { has_key: false, error: true };
   }
@@ -58,7 +64,10 @@ async function waitForPersonalityData(timeoutMs = 15000) {
 }
 
 async function validateKey(key) {
-  const body = { openai_api_key: key };
+  // Use appropriate key field based on mode
+  const body = currentMode === "claude"
+    ? { anthropic_api_key: key }
+    : { openai_api_key: key };
   const resp = await fetch("/validate_api_key", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -72,8 +81,12 @@ async function validateKey(key) {
 }
 
 async function saveKey(key) {
-  const body = { openai_api_key: key };
-  const resp = await fetch("/openai_api_key", {
+  // Use appropriate endpoint and key field based on mode
+  const endpoint = currentMode === "claude" ? "/anthropic_api_key" : "/openai_api_key";
+  const body = currentMode === "claude"
+    ? { anthropic_api_key: key }
+    : { openai_api_key: key };
+  const resp = await fetch(endpoint, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -215,6 +228,23 @@ async function init() {
   show(personalityPanel, false);
 
   const st = (await waitForStatus()) || { has_key: false };
+
+  // Update UI labels based on mode
+  const formHeading = document.getElementById("form-heading");
+  const apiKeyLabel = document.getElementById("api-key-label");
+  const configuredMsg = document.getElementById("configured-msg");
+  if (currentMode === "claude") {
+    if (formHeading) formHeading.textContent = "Connect Anthropic";
+    if (apiKeyLabel) apiKeyLabel.textContent = "Anthropic API Key";
+    if (configuredMsg) configuredMsg.textContent = "Anthropic API key is configured. You can jump straight to personalities.";
+    if (input) input.placeholder = "sk-ant-...";
+  } else {
+    if (formHeading) formHeading.textContent = "Connect OpenAI";
+    if (apiKeyLabel) apiKeyLabel.textContent = "OpenAI API Key";
+    if (configuredMsg) configuredMsg.textContent = "OpenAI API key is configured. You can jump straight to personalities.";
+    if (input) input.placeholder = "sk-...";
+  }
+
   if (st.has_key) {
     statusEl.textContent = "";
     show(configuredPanel, true);
