@@ -302,6 +302,7 @@ class ClaudeConversationHandler(AsyncStreamHandler):
             claude_tools = convert_tools_to_claude_format(tool_specs)
 
             # Call Claude API
+            logger.debug("Sending to Claude: %d messages, %d tools", len(self.messages), len(claude_tools) if claude_tools else 0)
             response = self.client.messages.create(
                 model=self.model,
                 max_tokens=1024,
@@ -309,6 +310,9 @@ class ClaudeConversationHandler(AsyncStreamHandler):
                 messages=self.messages,
                 tools=claude_tools if claude_tools else None,
             )
+
+            # Log response content blocks
+            logger.info("Claude response blocks: %s", [f"{b.type}" for b in response.content])
 
             # Process response
             assistant_text = ""
@@ -324,11 +328,18 @@ class ClaudeConversationHandler(AsyncStreamHandler):
                         "input": block.input,
                     })
 
-            # Handle tool calls
+            # Handle tool calls and/or text response
             if tool_calls:
+                # If there's text alongside tool calls, speak it first
+                if assistant_text:
+                    logger.info("Speaking initial text before tool execution: '%s...'",
+                               assistant_text[:50] if len(assistant_text) > 50 else assistant_text)
+                    await self._speak_response(assistant_text)
+
+                # Then handle the tool calls
                 await self._handle_tool_calls(tool_calls, response)
             elif assistant_text:
-                # Regular text response - synthesize and play
+                # Regular text response (no tools) - synthesize and play
                 await self._speak_response(assistant_text)
 
                 # Add to history
@@ -414,30 +425,100 @@ class ClaudeConversationHandler(AsyncStreamHandler):
             "content": tool_results,
         })
 
-        # Get follow-up response from Claude
-        tool_specs = get_tool_specs()
-        claude_tools = convert_tools_to_claude_format(tool_specs)
+        # Get follow-up response from Claude (may need multiple rounds for tool chains)
+        max_tool_rounds = 5  # Prevent infinite loops
+        for round_num in range(max_tool_rounds):
+            tool_specs = get_tool_specs()
+            claude_tools = convert_tools_to_claude_format(tool_specs)
 
-        follow_up = self.client.messages.create(
-            model=self.model,
-            max_tokens=1024,
-            system=self.system_prompt,
-            messages=self.messages,
-            tools=claude_tools if claude_tools else None,
-        )
+            logger.info("Sending follow-up request to Claude (round %d)", round_num + 1)
+            follow_up = self.client.messages.create(
+                model=self.model,
+                max_tokens=1024,
+                system=self.system_prompt,
+                messages=self.messages,
+                tools=claude_tools if claude_tools else None,
+            )
 
-        # Extract text from follow-up
-        follow_up_text = ""
-        for block in follow_up.content:
-            if block.type == "text":
-                follow_up_text += block.text
+            # Log what we got back
+            logger.info("Follow-up response blocks: %s",
+                        [f"{b.type}" for b in follow_up.content])
 
-        if follow_up_text:
-            await self._speak_response(follow_up_text)
-            self.messages.append({
-                "role": "assistant",
-                "content": follow_up_text,
-            })
+            # Extract text and tool calls from follow-up
+            follow_up_text = ""
+            follow_up_tool_calls = []
+            for block in follow_up.content:
+                if block.type == "text":
+                    follow_up_text += block.text
+                elif block.type == "tool_use":
+                    follow_up_tool_calls.append({
+                        "id": block.id,
+                        "name": block.name,
+                        "input": block.input,
+                    })
+
+            # Handle any additional tool calls in follow-up
+            if follow_up_tool_calls:
+                logger.info("Follow-up has %d more tool calls", len(follow_up_tool_calls))
+
+                # Add assistant message with tool use
+                self.messages.append({
+                    "role": "assistant",
+                    "content": follow_up.content,
+                })
+
+                # Execute tools
+                more_results = []
+                for tc in follow_up_tool_calls:
+                    tool_name = tc["name"]
+                    tool_input = tc["input"]
+                    call_id = tc["id"]
+
+                    logger.info("Executing follow-up tool: %s", tool_name)
+                    try:
+                        result = await dispatch_tool_call(
+                            tool_name,
+                            json.dumps(tool_input),
+                            self.deps
+                        )
+                        more_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": call_id,
+                            "content": json.dumps(result),
+                        })
+                    except Exception as e:
+                        logger.error("Follow-up tool execution failed: %s", e)
+                        more_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": call_id,
+                            "content": json.dumps({"error": str(e)}),
+                            "is_error": True,
+                        })
+
+                # Add tool results and continue loop
+                self.messages.append({
+                    "role": "user",
+                    "content": more_results,
+                })
+
+                # If there was also text, speak it before continuing
+                if follow_up_text:
+                    await self._speak_response(follow_up_text)
+
+                continue  # Get next follow-up response
+
+            # No more tool calls - speak final text response
+            if follow_up_text:
+                logger.info("Final follow-up text: '%s...'", follow_up_text[:50] if len(follow_up_text) > 50 else follow_up_text)
+                await self._speak_response(follow_up_text)
+                self.messages.append({
+                    "role": "assistant",
+                    "content": follow_up_text,
+                })
+            else:
+                logger.warning("Follow-up response had no text to speak!")
+
+            break  # Exit loop when no more tool calls
 
     async def _speak_response(self, text: str) -> None:
         """Synthesize and queue audio for response text."""
@@ -519,7 +600,9 @@ class ClaudeConversationHandler(AsyncStreamHandler):
         Args:
             frame: Tuple of (sample_rate, audio_data)
         """
-        if self._shutdown_requested:
+        # If shutdown requested but we're still listening, continue feeding audio
+        # so STT can finalize the transcript
+        if self._shutdown_requested and not self.is_listening:
             return
 
         input_sample_rate, audio_frame = frame
@@ -594,9 +677,49 @@ class ClaudeConversationHandler(AsyncStreamHandler):
         """Clean up resources."""
         self._shutdown_requested = True
 
+        # If we're listening, feed silence to STT to trigger end-of-speech detection
+        # WebRTC stops sending audio when session ends, so STT can't detect silence naturally
+        if self.is_listening and self.stt:
+            logger.info("Feeding silence to STT to trigger finalization...")
+            # Create 1 second of silence at 16kHz (STT's expected rate)
+            silence = np.zeros(16000, dtype=np.int16)
+            # Feed silence in chunks to simulate natural audio flow
+            for _ in range(10):  # 10 x 100ms = 1 second of silence
+                self.stt.feed_audio(silence[:1600], 16000)  # 100ms chunks
+                await asyncio.sleep(0.1)
+                if not self.is_listening:
+                    logger.info("STT finalized after silence injection")
+                    break
+
+        # Wait for listening to complete (STT to finalize)
+        if self.is_listening:
+            logger.info("Waiting for STT to finalize transcript...")
+            for _ in range(30):  # Wait up to 3 more seconds for STT finalization
+                await asyncio.sleep(0.1)
+                if not self.is_listening:
+                    logger.info("STT finalized, is_listening=False")
+                    break
+
+            # If STT still hasn't finalized but we have a partial transcript, use it
+            if self.is_listening and self._current_transcript:
+                logger.info("Force-finalizing with last partial transcript: '%s'", self._current_transcript)
+                self.is_listening = False
+                if self.deps.movement_manager:
+                    self.deps.movement_manager.set_listening(False)
+
+                # Emit as final user transcript
+                await self.output_queue.put(
+                    AdditionalOutputs({"role": "user", "content": self._current_transcript})
+                )
+
+                # Process with Claude
+                await self._process_with_claude(self._current_transcript)
+            elif self.is_listening:
+                logger.warning("STT did not finalize and no transcript available")
+
         # Wait for any ongoing processing (Claude API calls, TTS) to complete
         if self.is_processing:
-            logger.debug("Waiting for processing to complete...")
+            logger.info("Waiting for processing to complete...")
             for _ in range(100):  # Wait up to 10 seconds for processing
                 await asyncio.sleep(0.1)
                 if not self.is_processing:
@@ -606,7 +729,7 @@ class ClaudeConversationHandler(AsyncStreamHandler):
 
         # Give STT a moment to finalize any pending transcript
         if self.stt and self.stt._is_streaming:
-            logger.debug("Waiting for STT to finalize...")
+            logger.debug("Waiting for STT stream to close...")
             for _ in range(10):  # Wait up to 1 second
                 await asyncio.sleep(0.1)
                 # Check if we got a final transcript
