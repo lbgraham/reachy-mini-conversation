@@ -169,10 +169,13 @@ class ClaudeConversationHandler(AsyncStreamHandler):
     async def get_available_voices(self) -> list[str]:
         """Return available voices for Claude mode (Google TTS voices).
 
-        For now returns a simple list since we use Google TTS.
+        Includes 'cedar' as first option for compatibility with existing profiles
+        (maps to en-US-Standard-F in Google TTS).
         """
-        # Google TTS Standard voices that work well
+        # Include "cedar" for backwards compatibility with OpenAI profiles
+        # It will map to the default Google TTS voice
         return [
+            "cedar",  # Compatibility alias -> maps to en-US-Standard-F
             "en-US-Standard-F",
             "en-US-Standard-A",
             "en-US-Standard-B",
